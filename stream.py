@@ -14,6 +14,15 @@ from sklearn.metrics import accuracy_score, mean_squared_error
 from sklearn.datasets import load_iris, fetch_california_housing
 import warnings
 warnings.filterwarnings("ignore")
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, HRFlowable
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+import io
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use("Agg")
 
 try:
     import tensorflow as tf
@@ -237,6 +246,197 @@ def conformal_classification(model, X_train, y_train, X_test, alpha):
     y_pred = model.predict(X_test)
     prediction_sets = (1 - test_probs) <= q_hat
     return y_pred, prediction_sets, prediction_sets.sum(axis=1), q_hat, cal_scores
+
+def generate_pdf_report(task, model_name, confidence, alpha, results_df,
+                         coverage, q_hat, extra_metrics, cal_scores,
+                         y_pred=None, lower=None, upper=None, y_test=None,
+                         set_sizes=None):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter,
+                            rightMargin=0.75*inch, leftMargin=0.75*inch,
+                            topMargin=0.75*inch, bottomMargin=0.75*inch)
+    styles = getSampleStyleSheet()
+
+    # Custom styles
+    title_style = ParagraphStyle("CustomTitle", parent=styles["Title"],
+                                  fontSize=22, textColor=colors.HexColor("#1a73e8"),
+                                  spaceAfter=6)
+    heading_style = ParagraphStyle("CustomHeading", parent=styles["Heading2"],
+                                    fontSize=13, textColor=colors.HexColor("#0d47a1"),
+                                    spaceBefore=12, spaceAfter=4)
+    body_style = ParagraphStyle("CustomBody", parent=styles["Normal"],
+                                 fontSize=10, leading=14)
+    small_style = ParagraphStyle("Small", parent=styles["Normal"],
+                                  fontSize=8, textColor=colors.grey)
+
+    story = []
+
+    # ---- TITLE PAGE ----
+    story.append(Spacer(1, 0.3*inch))
+    story.append(Paragraph("Conformal Prediction Analysis Report", title_style))
+    story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor("#1a73e8")))
+    story.append(Spacer(1, 0.1*inch))
+
+    from datetime import datetime
+    story.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y at %H:%M')}", small_style))
+    story.append(Spacer(1, 0.2*inch))
+
+    # ---- SECTION 1: CONFIGURATION ----
+    story.append(Paragraph("1. Analysis Configuration", heading_style))
+    config_data = [
+        ["Parameter", "Value"],
+        ["Task Type", task],
+        ["Model", model_name],
+        ["Confidence Level", f"{confidence}%"],
+        ["Significance Level (alpha)", str(alpha)],
+        ["Quantile Threshold (q-hat)", f"{q_hat:.4f}"],
+    ]
+    config_table = Table(config_data, colWidths=[2.5*inch, 4*inch])
+    config_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a73e8")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#f8f9ff")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor("#f8f9ff"), colors.white]),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("ROUNDEDCORNERS", [4, 4, 4, 4]),
+    ]))
+    story.append(config_table)
+    story.append(Spacer(1, 0.2*inch))
+
+    # ---- SECTION 2: PERFORMANCE METRICS ----
+    story.append(Paragraph("2. Performance Metrics", heading_style))
+    metrics_data = [["Metric", "Value"]]
+    metrics_data.append(["Empirical Coverage", f"{coverage*100:.1f}%"])
+    metrics_data.append(["Target Coverage", f"{confidence}%"])
+    coverage_gap = coverage*100 - confidence
+    metrics_data.append(["Coverage Gap", f"{coverage_gap:+.1f}%"])
+    for k, v in extra_metrics.items():
+        metrics_data.append([k, str(v)])
+
+    metrics_table = Table(metrics_data, colWidths=[2.5*inch, 4*inch])
+    metrics_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0d47a1")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor("#e8f5e9"), colors.white]),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(metrics_table)
+    story.append(Spacer(1, 0.2*inch))
+
+    # ---- SECTION 3: PLOTS ----
+    story.append(Paragraph("3. Visualizations", heading_style))
+
+    # Plot 1: Prediction intervals or set sizes
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.5))
+
+    if task == "Regression" and y_pred is not None:
+        sorted_idx = np.argsort(y_pred)
+        axes[0].plot(y_pred[sorted_idx], color="#1a73e8", label="Predicted", linewidth=1.5)
+        axes[0].fill_between(range(len(sorted_idx)), lower[sorted_idx], upper[sorted_idx],
+                             alpha=0.25, color="#1a73e8", label=f"{confidence}% Interval")
+        axes[0].scatter(range(len(sorted_idx)), y_test[sorted_idx],
+                        color="red", s=6, label="Actual", zorder=5)
+        axes[0].set_title("Conformal Prediction Intervals", fontsize=10, fontweight="bold")
+        axes[0].set_xlabel("Sample Index")
+        axes[0].set_ylabel("Value")
+        axes[0].legend(fontsize=7)
+        axes[0].grid(True, alpha=0.3)
+    else:
+        axes[0].hist(set_sizes, bins=range(1, int(set_sizes.max()) + 2),
+                     color="#1a73e8", edgecolor="white", align="left")
+        axes[0].set_title("Prediction Set Size Distribution", fontsize=10, fontweight="bold")
+        axes[0].set_xlabel("Set Size")
+        axes[0].set_ylabel("Count")
+        axes[0].grid(True, alpha=0.3)
+
+    # Plot 2: Calibration score distribution
+    axes[1].hist(cal_scores, bins=30, color="#0d47a1", edgecolor="white", alpha=0.8)
+    axes[1].axvline(x=q_hat, color="red", linestyle="--", linewidth=1.5,
+                    label=f"q-hat = {q_hat:.3f}")
+    axes[1].set_title("Nonconformity Score Distribution", fontsize=10, fontweight="bold")
+    axes[1].set_xlabel("Nonconformity Score")
+    axes[1].set_ylabel("Count")
+    axes[1].legend(fontsize=7)
+    axes[1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    img_buffer = io.BytesIO()
+    plt.savefig(img_buffer, format="png", dpi=150, bbox_inches="tight")
+    img_buffer.seek(0)
+    plt.close()
+
+    from reportlab.platypus import Image as RLImage
+    img = RLImage(img_buffer, width=6.5*inch, height=2.5*inch)
+    story.append(img)
+    story.append(Spacer(1, 0.2*inch))
+
+    # ---- SECTION 4: RESULTS TABLE (first 20 rows) ----
+    story.append(PageBreak())
+    story.append(Paragraph("4. Prediction Results (first 20 rows)", heading_style))
+    story.append(Paragraph("Full results available as CSV download in the app.", small_style))
+    story.append(Spacer(1, 0.1*inch))
+
+    preview_df = results_df.head(20)
+    table_data = [list(preview_df.columns)]
+    for _, row in preview_df.iterrows():
+        table_data.append([str(v) for v in row.values])
+
+    col_width = 6.5*inch / len(preview_df.columns)
+    results_table = Table(table_data, colWidths=[col_width]*len(preview_df.columns))
+    results_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a73e8")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor("#f8f9ff"), colors.white]),
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cccccc")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(results_table)
+    story.append(Spacer(1, 0.3*inch))
+
+    # ---- SECTION 5: INTERPRETATION ----
+    story.append(Paragraph("5. Interpretation", heading_style))
+    if coverage * 100 >= confidence:
+        interp = (f"The model achieved {coverage*100:.1f}% empirical coverage, which meets the "
+                  f"target of {confidence}%. The conformal prediction {('intervals' if task == 'Regression' else 'sets')} "
+                  f"are well-calibrated.")
+    else:
+        interp = (f"The model achieved {coverage*100:.1f}% empirical coverage, slightly below the "
+                  f"target of {confidence}%. Consider increasing the dataset size or adjusting alpha.")
+    story.append(Paragraph(interp, body_style))
+    story.append(Spacer(1, 0.1*inch))
+    story.append(Paragraph(
+        f"The quantile threshold q-hat = {q_hat:.4f} was computed from the calibration set "
+        f"nonconformity scores. This value determines the width of prediction intervals (regression) "
+        f"or the size of prediction sets (classification).",
+        body_style
+    ))
+
+    story.append(Spacer(1, 0.2*inch))
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cccccc")))
+    story.append(Spacer(1, 0.1*inch))
+    story.append(Paragraph("Generated by Conformal Prediction App", small_style))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
 
 # ---- SIDEBAR ----
 st.sidebar.markdown("## ⚙️ Settings")
@@ -724,8 +924,45 @@ with tab3:
                         st.dataframe(results_df)
 
                     csv = results_df.to_csv(index=False).encode("utf-8")
-                    st.download_button("📥 Download Results", data=csv,
+                    st.download_button("📥 Download Results as CSV", data=csv,
                                        file_name="conformal_results.csv", mime="text/csv")
+
+                    # ---- OPTIONAL PDF REPORT ----
+                    st.subheader("📄 Generate PDF Report (Optional)")
+                    if st.checkbox("Generate a downloadable PDF report of this analysis"):
+                        with st.spinner("Building PDF report..."):
+                            if task == "Regression":
+                                extra_metrics = {
+                                    "RMSE": f"{rmse:.4f}",
+                                    "Avg Interval Width": f"{interval_width.mean():.3f}",
+                                    "Min Interval Width": f"{interval_width.min():.3f}",
+                                    "Max Interval Width": f"{interval_width.max():.3f}",
+                                }
+                                pdf_buffer = generate_pdf_report(
+                                    task, model_name, confidence, alpha,
+                                    results_df, coverage, q_hat, extra_metrics,
+                                    cal_scores, y_pred=y_pred, lower=lower,
+                                    upper=upper, y_test=y_test
+                                )
+                            else:
+                                extra_metrics = {
+                                    "Accuracy": f"{acc*100:.1f}%",
+                                    "Avg Prediction Set Size": f"{set_sizes.mean():.2f}",
+                                    "Min Set Size": f"{int(set_sizes.min())}",
+                                    "Max Set Size": f"{int(set_sizes.max())}",
+                                }
+                                pdf_buffer = generate_pdf_report(
+                                    task, model_name, confidence, alpha,
+                                    results_df, coverage, q_hat, extra_metrics,
+                                    cal_scores, set_sizes=set_sizes
+                                )
+
+                        st.download_button(
+                            label="📄 Download PDF Report",
+                            data=pdf_buffer,
+                            file_name="conformal_prediction_report.pdf",
+                            mime="application/pdf"
+                        )
     else:
         st.info("Upload a CSV file to get started.")
 
